@@ -31,15 +31,17 @@ import {
   VStack,
 } from '@chakra-ui/react';
 import React, { useEffect, useState } from 'react';
-import { BiCalendarHeart, BiTrashAlt, BiUnlink } from 'react-icons/bi';
+import { BiCalendarHeart, BiSync, BiTrashAlt, BiUnlink } from 'react-icons/bi';
 import { CiSettings } from 'react-icons/ci';
 import { TbSlashes } from 'react-icons/tb';
 import { GithubHandler } from '../handlers';
 import { CustomEditableComponent } from './Editable';
 
-interface SettingsMenuProps {}
+interface SettingsMenuProps {
+  onSyncStart: () => void;
+}
 
-const SettingsMenu: React.FC<SettingsMenuProps> = () => {
+const SettingsMenu: React.FC<SettingsMenuProps> = ({ onSyncStart }) => {
   const [subdirectory, setSubdirectoryValue] = useState<string | null>(null);
 
   const [isOpen, setOpen] = useState<'unlink' | 'clear' | 'subdirectory' | null>(null);
@@ -276,6 +278,15 @@ const SettingsMenu: React.FC<SettingsMenuProps> = () => {
               </PopoverBody>
             </PopoverContent>
           </Popover>
+
+          <MenuItem
+            h="100%"
+            icon={<BiSync fontSize={'1.2rem'} />}
+            minH="40px"
+            onClick={onSyncStart}
+          >
+            Sync problems from repo
+          </MenuItem>
 
           <MenuItem
             h="100%"

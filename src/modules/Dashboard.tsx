@@ -16,7 +16,9 @@ import { CiSettings } from 'react-icons/ci';
 import DoughnutComponent from '../components/Doughnut';
 import SettingsMenu from '../components/SettingsMenu';
 import StreakCounter from '../components/StreakCounter';
+import SyncOverlay, { SyncStatus } from '../components/SyncOverlay';
 import { getProblemsSolved } from '../lib/problemsSolvedStorage';
+import { syncProblemsFromRepo } from '../lib/syncFromRepo';
 import {
   formatProblemsPerDay,
   generateTitle,
@@ -79,8 +81,26 @@ const Dashboard: React.FC<DashboardProps> = ({}) => {
   }>();
   const [githubUsername, setGithubUsername] = React.useState('');
   const [githubRepo, setGithubRepo] = React.useState('');
+  const [syncStatus, setSyncStatus] = React.useState<SyncStatus>({ state: 'idle' });
 
   const solvedProblemsToday = problemsPerDay?.[new Date().toLocaleDateString()] || 0;
+
+  const handleSyncStart = async () => {
+    setSyncStatus({ state: 'running', processed: 0, total: 0 });
+    try {
+      const result = await syncProblemsFromRepo((status) => {
+        if (status.stage === 'reading') {
+          setSyncStatus({ state: 'running', processed: status.processed, total: status.total });
+        }
+      });
+      setSyncStatus({ state: 'done', result });
+    } catch (err) {
+      setSyncStatus({
+        state: 'error',
+        message: err instanceof Error ? err.message : 'Sync failed',
+      });
+    }
+  };
 
   React.useEffect(() => {
     chrome.storage.sync.get(['github_username', 'github_leetsync_repo'], (result) => {
@@ -125,8 +145,13 @@ const Dashboard: React.FC<DashboardProps> = ({}) => {
       pos="relative"
     >
       <Box pos="absolute" top="24px" right="16px">
-        <SettingsMenu />
+        <SettingsMenu onSyncStart={handleSyncStart} />
       </Box>
+      <SyncOverlay
+        status={syncStatus}
+        onClose={() => setSyncStatus({ state: 'idle' })}
+        onReload={() => window.location.reload()}
+      />
       <VStack w="100%" h="100%" align="flex-start" justify={'flex-start'} spacing={8}>
         <HStack w="100%" align={'center'}>
           {solvedProblemsToday ? (
