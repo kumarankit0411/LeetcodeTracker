@@ -16,6 +16,7 @@ import { useNavigate } from 'react-router-dom';
 import Logo from '../components/Logo';
 import { GITHUB_REDIRECT_URI, GITHUB_CLIENT_ID } from '../constants';
 import { GithubHandler } from '../handlers';
+import { parseRepoUrl } from '../handlers/GithubHandler';
 import { Footer } from './Footer';
 
 const AuthorizeWithGithub = ({ nextStep }: { nextStep: Function }) => {
@@ -125,23 +126,26 @@ const SelectRepositoryStep = ({ nextStep }: { nextStep: Function }) => {
     if (!repositoryURL) return setError('Repository URL is required');
     if (!accessToken) return setError('Access token is required');
 
-    const repoName = repositoryURL.split('/').pop();
-    const username = repositoryURL.split('/').slice(-2)[0];
-    if (!repoName || !username) {
+    const parsed = parseRepoUrl(repositoryURL);
+    if (!parsed) {
       return setError('Invalid repository URL');
     }
+    const { owner: username, repo: repoName } = parsed;
 
     setLoading(true);
     const github = new GithubHandler();
     const isFound = await github.checkIfRepoExists(`${username}/${repoName}`);
     setLoading(false);
     if (!isFound) {
-      return setError('Repository not found');
+      return setError(github.getRepoCheckError() || 'Repository not found');
     }
-    chrome.storage.sync.set({ github_leetsync_repo: repoName }, () => {
-      console.log('Repository Linked Successfully');
-      navigate(0);
-    });
+    chrome.storage.sync.set(
+      { github_leetsync_repo: repoName, github_leetsync_owner: username },
+      () => {
+        console.log('Repository Linked Successfully');
+        navigate(0);
+      },
+    );
   };
 
   useEffect(() => {

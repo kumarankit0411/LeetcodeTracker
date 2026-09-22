@@ -1,4 +1,4 @@
-import GithubHandler from '../handlers/GithubHandler';
+import GithubHandler, { parseRepoUrl } from '../handlers/GithubHandler';
 
 jest.mock('../constants', () => ({
   GITHUB_CLIENT_ID: '',
@@ -12,10 +12,55 @@ describe('GithubHandler utility methods', () => {
       storage: {
         sync: {
           get: jest.fn((keys: any, cb: any) => cb({})),
+          set: jest.fn(),
           clear: jest.fn(),
+        },
+        local: {
+          set: jest.fn(),
         },
       },
     };
+  });
+
+  it('parses an https repo url', () => {
+    expect(parseRepoUrl('https://github.com/kumarankit0411/LeetcodeTracker')).toEqual({
+      owner: 'kumarankit0411',
+      repo: 'LeetcodeTracker',
+    });
+  });
+
+  it('parses an https repo url ending in .git', () => {
+    expect(parseRepoUrl('https://github.com/kumarankit0411/LeetcodeTracker.git')).toEqual({
+      owner: 'kumarankit0411',
+      repo: 'LeetcodeTracker',
+    });
+  });
+
+  it('parses an ssh repo url', () => {
+    expect(parseRepoUrl('git@github.com:kumarankit0411/LeetcodeTracker.git')).toEqual({
+      owner: 'kumarankit0411',
+      repo: 'LeetcodeTracker',
+    });
+  });
+
+  it('parses a bare owner/repo string', () => {
+    expect(parseRepoUrl('kumarankit0411/LeetcodeTracker')).toEqual({
+      owner: 'kumarankit0411',
+      repo: 'LeetcodeTracker',
+    });
+  });
+
+  it('tolerates trailing slashes', () => {
+    expect(parseRepoUrl('https://github.com/yoda/RepoName/')).toEqual({
+      owner: 'yoda',
+      repo: 'RepoName',
+    });
+  });
+
+  it('returns null for invalid urls', () => {
+    expect(parseRepoUrl('')).toBeNull();
+    expect(parseRepoUrl('not-a-repo-url')).toBeNull();
+    expect(parseRepoUrl('https://github.com/only-owner')).toBeNull();
   });
 
   it('returns correct file extension for a language', () => {

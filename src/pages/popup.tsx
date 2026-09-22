@@ -114,6 +114,18 @@ const PopupPage: React.FC<PopupProps> = () => {
     }
   }, []);
 
+  useEffect(() => {
+    if (isSynced) {
+      chrome.storage.sync.get('github_auth_expired', (result) => {
+        // the stored token no longer works, route straight to re-login
+        if (result?.github_auth_expired) {
+          setIsSynced(false);
+          setSteps(1);
+        }
+      });
+    }
+  }, [isSynced]);
+
   if (isSynced) {
     //show the dashboard page
     return <Dashboard />;

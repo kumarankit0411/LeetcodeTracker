@@ -8,6 +8,24 @@ type DistributionType = {
   value: number;
 };
 
+const bodyIsBadCredentials = (body: unknown): boolean =>
+  typeof body === 'object' && body !== null && (body as any)?.message === 'Bad credentials';
+
+// A 401 "Bad credentials" means the stored OAuth token was revoked or has
+// expired. Flag it so the UI can prompt re-authorization, and invalidate the
+// stale token without wiping the rest of the user's settings.
+const markAuthExpired = async (): Promise<void> => {
+  await chrome.storage.sync.remove('github_leetsync_token');
+  await chrome.storage.sync.set({
+    github_auth_expired: true,
+    github_auth_expired_at: Date.now(),
+  });
+};
+
+export const getGithubAuthUrl = (): string => {
+  return `https://github.com/login/oauth/authorize?client_id=${GITHUB_CLIENT_ID}&redirect_uri=${GITHUB_REDIRECT_URI}&scope=repo`;
+};
+
 const languagesToExtensions: Record<string, string> = {
   Python: '.py',
   Python3: '.py',
@@ -50,6 +68,41 @@ interface GithubUser {
   login: string;
   /* other user data can be added here, but not needed for now */
 }
+
+export type RepoUrlInfo = {
+  owner: string;
+  repo: string;
+};
+
+export const parseRepoUrl = (url: string): RepoUrlInfo | null => {
+  const trimmed = url.trim().replace(/\/+$/, '');
+  if (!trimmed) return null;
+
+  let owner: string | undefined;
+  let repo: string | undefined;
+
+  const httpsMatch = trimmed.match(/^https?:\/\/[^/]+\/([^/]+)\/([^/]+)$/);
+  const sshMatch = trimmed.match(/^git@[^:]+:([^/]+)\/(.+)$/);
+
+  if (httpsMatch) {
+    owner = httpsMatch[1];
+    repo = httpsMatch[2];
+  } else if (sshMatch) {
+    owner = sshMatch[1];
+    repo = sshMatch[2];
+  } else if (!trimmed.includes('://') && !trimmed.startsWith('git@')) {
+    const parts = trimmed.split('/');
+    if (parts.length === 2 && parts[0] && parts[1]) {
+      owner = parts[0];
+      repo = parts[1];
+    }
+  }
+
+  if (!owner || !repo) return null;
+  repo = repo.replace(/\.git$/i, '');
+  if (!owner || !repo) return null;
+  return { owner, repo };
+};
 export default class GithubHandler {
   base_url: string = 'https://api.github.com';
   private client_secret: string | null = GITHUB_CLIENT_SECRET ?? '';
@@ -57,15 +110,16 @@ export default class GithubHandler {
   private redirect_uri: string | null = GITHUB_REDIRECT_URI ?? '';
   private accessToken: string;
   private username: string;
+  private repoOwner: string;
   private repo: string;
   private github_leetsync_subdirectory: string;
 
   constructor() {
-    //inject QuestionHandler dependency
     //fetch github_access_token, github_username, github_leetsync_repo from storage
     //if any of them is not present, throw an error
     this.accessToken = '';
     this.username = '';
+    this.repoOwner = '';
     this.repo = '';
     this.github_leetsync_subdirectory = '';
 
@@ -74,22 +128,32 @@ export default class GithubHandler {
         'github_leetsync_token',
         'github_username',
         'github_leetsync_repo',
+        'github_leetsync_owner',
         'github_leetsync_subdirectory',
       ],
       (result) => {
         if (
           !result.github_leetsync_token ||
-          !result.github_username ||
           !result.github_leetsync_repo
         ) {
           console.log('❌ GithubHandler: Missing Github Credentials');
         }
         this.accessToken = result['github_leetsync_token'];
         this.username = result['github_username'];
-        this.repo = result['github_leetsync_repo'];
+        this.repoOwner =
+          result['github_leetsync_owner'] ?? result['github_leetsync_repo']?.split('/')[0];
+        this.repo = (result['github_leetsync_repo'] ?? '').split('/').pop()?.replace(/\.git$/i, '');
         this.github_leetsync_subdirectory = result['github_leetsync_subdirectory'];
       },
     );
+  }
+
+  private getOwnerForRepoPath(): string {
+    return this.repoOwner || this.username;
+  }
+
+  private getRepoContentsPath(path: string, fileName: string): string {
+    return `https://api.github.com/repos/${this.getOwnerForRepoPath()}/${this.repo}/contents/${path}/${fileName}`;
   }
   async loadTokenFromStorage(): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -110,6 +174,7 @@ export default class GithubHandler {
     if (!access_token || !user) return null;
     this.accessToken = access_token;
     this.username = user.login;
+    await chrome.storage.sync.remove('github_auth_expired');
     return access_token;
   }
   async fetchGithubUser(token: string): Promise<GithubUser | null> {
@@ -168,24 +233,48 @@ export default class GithubHandler {
     });
     return response.access_token;
   }
+  private lastRepoCheckError: string | null = null;
+
+  getRepoCheckError(): string | null {
+    return this.lastRepoCheckError;
+  }
+
   async checkIfRepoExists(repo_name: string): Promise<boolean> {
-    const trimmedRepoName = repo_name.replace('.git', '').trim();
+    this.lastRepoCheckError = null;
+    const trimmedRepoName = repo_name.replace(/\.git$/i, '').trim().replace(/\/+$/, '');
     if (!trimmedRepoName) return false;
     //check if repo exists in github user's account
-    const result = await fetch(`${this.base_url}/repos/${trimmedRepoName}`, {
-      method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        Authorization: `token ${await this.loadTokenFromStorage()}`,
-      },
-    })
-      .then((x) => x.json())
-      .catch((e) => console.error(e));
-    if (result.message === 'Not Found' || result.message === 'Bad credentials') {
+    try {
+      const response = await fetch(`${this.base_url}/repos/${trimmedRepoName}`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          Authorization: `token ${await this.loadTokenFromStorage()}`,
+        },
+      });
+      const body = await response.json().catch(() => null);
+      if (response.status === 404) {
+        this.lastRepoCheckError = 'Repository not found';
+        return false;
+      }
+      if (response.status === 401 && bodyIsBadCredentials(body)) {
+        this.lastRepoCheckError =
+          'Your GitHub token is invalid or expired. Please re-authenticate with GitHub and try again.';
+        await markAuthExpired();
+        return false;
+      }
+      if (!response.ok) {
+        this.lastRepoCheckError = `GitHub API error (${response.status})`;
+        console.error('⚠️ Could not verify repository:', response.status, body);
+        return false;
+      }
+      return true;
+    } catch (e) {
+      console.error(e);
+      this.lastRepoCheckError = 'Could not reach GitHub API';
       return false;
     }
-    return true;
   }
   public getProblemExtension(lang: string) {
     return languagesToExtensions[lang];
@@ -194,43 +283,62 @@ export default class GithubHandler {
   /* Submissions Methods */
   async fileExists(path: string, fileName: string): Promise<string | null> {
     //check if the file exists in the path using the github API
-    const url = `https://api.github.com/repos/${this.username}/${this.repo}/contents/${path}/${fileName}`;
+    const url = this.getRepoContentsPath(path, fileName);
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${this.accessToken}`,
+          'Content-Type': 'application/json',
+        },
+      });
+    } catch (err) {
+      throw new Error(`Could not reach GitHub API: ${err instanceof Error ? err.message : err}`);
+    }
 
-    const uploadedFile = await fetch(url, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${this.accessToken}`,
-        'Content-Type': 'application/json',
-      },
-    })
-      .then((x) => x.json())
-      .catch((err) => console.log(err));
-
-    if (uploadedFile.message === 'Not Found') {
+    if (response.status === 404) {
       return null;
     }
-    return uploadedFile.sha;
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      throw new Error(
+        `GitHub API error (${response.status}): ${(body as any)?.message ?? response.statusText}`,
+      );
+    }
+    const uploadedFile = await response.json();
+    return uploadedFile.sha ?? null;
   }
   async upload(path: string, fileName: string, content: string, commitMessage: string) {
     const sha = await this.fileExists(path, fileName);
     //create a new file with the content
-    const url = `https://api.github.com/repos/${this.username}/${this.repo}/contents/${path}/${fileName}`;
+    const url = this.getRepoContentsPath(path, fileName);
     const data = {
       message: commitMessage,
       content: btoa(unescape(encodeURIComponent(content))),
-      sha, //if the file already exists, we need to pass the sha of the file otherwise it will be null
+      ...(sha ? { sha } : {}), //if the file already exists, we need to pass the sha of the file otherwise it will be null
     };
 
-    await fetch(url, {
-      method: 'PUT',
-      headers: {
-        Authorization: `Bearer ${this.accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(data),
-    })
-      .then((x) => x.json())
-      .catch((err) => console.log(err));
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${this.accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(data),
+      });
+    } catch (err) {
+      throw new Error(`Could not reach GitHub API: ${err instanceof Error ? err.message : err}`);
+    }
+
+    const body = await response.json().catch(() => null);
+    if (!response.ok) {
+      const message = (body as any)?.message ?? `GitHub API responded with ${response.status}`;
+      throw new Error(`Upload failed for ${path}/${fileName} (${response.status}): ${message}`);
+    }
+    return body;
   }
   getDifficultyColor(difficulty: QuestionDifficulty) {
     switch (difficulty) {
@@ -298,7 +406,7 @@ export default class GithubHandler {
   async submit(
     submission: Submission, //todo: define the submission type
   ): Promise<boolean> {
-    if (!this.accessToken || !this.username || !this.repo) return false;
+    if (!this.accessToken || !this.repo || !(this.username || this.repoOwner)) return false;
     const {
       code,
       memory,
@@ -334,47 +442,63 @@ export default class GithubHandler {
       console.log('❌ Language not supported');
       return false;
     }
-    await this.createReadmeFile(
-      basePath,
-      content,
-      `Added README.md file for ${title}`,
-      titleSlug,
-      title,
-      difficulty,
-    );
-    if (notes && notes?.length) {
-      await this.createNotesFile(basePath, notes, `Added Notes.md file for ${title}`, titleSlug);
+
+    const recordLocally = async () => {
+      const todayTimestamp = Date.now();
+      await chrome.storage.local.set({
+        lastSolved: { slug: titleSlug, timestamp: todayTimestamp },
+      });
+      const problemsSolved = await getProblemsSolved(); //{slug: {...info}}
+      await saveProblemsSolved({
+        ...problemsSolved,
+        [titleSlug]: {
+          question: {
+            difficulty,
+            questionId,
+          },
+          timestamp: todayTimestamp,
+        },
+      });
+    };
+
+    try {
+      await this.createReadmeFile(
+        basePath,
+        content,
+        `Added README.md file for ${title}`,
+        titleSlug,
+        title,
+        difficulty,
+      );
+      if (notes && notes?.length) {
+        await this.createNotesFile(basePath, notes, `Added Notes.md file for ${title}`, titleSlug);
+      }
+
+      await this.createSolutionFile(basePath, code, question.titleSlug, langExtension, {
+        memory,
+        memoryDisplay,
+        memoryPercentile,
+        runtime,
+        runtimeDisplay,
+        runtimePercentile,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error('❌ Failed to push solution to GitHub:', message);
+      await chrome.storage.local.set({
+        github_sync_error: {
+          message,
+          at: Date.now(),
+          slug: titleSlug,
+        },
+      });
+      // keep the local tracking intact even though the push failed
+      await recordLocally();
+      return false;
     }
 
-    await this.createSolutionFile(basePath, code, question.titleSlug, langExtension, {
-      memory,
-      memoryDisplay,
-      memoryPercentile,
-      runtime,
-      runtimeDisplay,
-      runtimePercentile,
-    });
-
-    const todayTimestamp = Date.now();
-
-    chrome.storage.local.set({
-      lastSolved: { slug: titleSlug, timestamp: todayTimestamp },
-    });
-
-    //update the problems solved
-    const problemsSolved = await getProblemsSolved(); //{slug: {...info}}
-
-    await saveProblemsSolved({
-      ...problemsSolved,
-      [titleSlug]: {
-        question: {
-          difficulty,
-          questionId,
-        },
-        timestamp: todayTimestamp,
-      },
-    });
     //create a new solution file with the code inside the folder
+    await recordLocally();
     return true;
   }
 }

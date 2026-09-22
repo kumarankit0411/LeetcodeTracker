@@ -1,4 +1,7 @@
 import {
+  Alert,
+  AlertDescription,
+  AlertIcon,
   Box,
   Container,
   Heading,
@@ -82,6 +85,7 @@ const Dashboard: React.FC<DashboardProps> = ({}) => {
   const [githubUsername, setGithubUsername] = React.useState('');
   const [githubRepo, setGithubRepo] = React.useState('');
   const [syncStatus, setSyncStatus] = React.useState<SyncStatus>({ state: 'idle' });
+  const [syncError, setSyncError] = React.useState<string | null>(null);
 
   const solvedProblemsToday = problemsPerDay?.[new Date().toLocaleDateString()] || 0;
 
@@ -131,6 +135,11 @@ const Dashboard: React.FC<DashboardProps> = ({}) => {
       setProblemsPerDay(problemsPerDay);
       setStreak(streaksCount);
     });
+
+    chrome.storage.local.get(['github_sync_error'], (result) => {
+      const err = result?.github_sync_error;
+      if (err?.message) setSyncError(err.message);
+    });
   }, []);
 
   return (
@@ -152,6 +161,14 @@ const Dashboard: React.FC<DashboardProps> = ({}) => {
         onClose={() => setSyncStatus({ state: 'idle' })}
         onReload={() => window.location.reload()}
       />
+      {syncError && (
+        <Alert status="warning" mb={4} fontSize="sm">
+          <AlertIcon />
+          <AlertDescription>
+            Failed to push a solution to GitHub: {syncError}
+          </AlertDescription>
+        </Alert>
+      )}
       <VStack w="100%" h="100%" align="flex-start" justify={'flex-start'} spacing={8}>
         <HStack w="100%" align={'center'}>
           {solvedProblemsToday ? (
